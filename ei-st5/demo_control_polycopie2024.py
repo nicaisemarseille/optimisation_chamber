@@ -1,0 +1,353 @@
+# -*- coding: utf-8 -*-
+
+
+# Python packages
+import matplotlib.pyplot
+import numpy
+import os
+import projected_chi
+
+# MRG packages
+import _env
+import preprocessing
+import processing
+import postprocessing
+import descent_gradient
+
+#import solutions
+
+
+def your_optimization_procedure(domain_omega, spacestep, omega, f, f_dir, f_neu, f_rob,
+                           beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob,
+                           Alpha, mu, chi, V_obj):
+    """This function return the optimized density.
+
+    Parameter:
+        cf solvehelmholtz's remarks
+        Alpha: complex, it corresponds to the absorbtion coefficient;
+        mu: float, it is the initial step of the gradient's descent;
+        V_obj: float, it characterizes the volume constraint on the density chi.
+    """
+    chi = descent_gradient.project(chi, 0.5, domain_omega)
+
+    k = 0
+    (M, N) = numpy.shape(domain_omega)
+    numb_iter = 200
+    energy = numpy.zeros((numb_iter+1, 1), dtype=numpy.float64)
+    while k < numb_iter and mu > 10**(-5):
+        print('---- iteration number = ', k)
+        print('1. computing solution of Helmholtz problem, i.e., u')
+        u = processing.solve_helmholtz(domain_omega, spacestep, wavenumber, f, f_dir, f_neu, f_rob,
+                        beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob)
+        print('2. computing solution of adjoint problem, i.e., p')
+        one = numpy.ones((M,N))
+        f_p = -2 * (one + mask_omega_interest)*u.conj()
+        f_dir_p = numpy.zeros((M, N), dtype=numpy.complex128)
+        p = processing.solve_helmholtz(domain_omega, spacestep, wavenumber, f_p, f_dir_p, f_neu, f_rob,
+                        beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob)
+
+        print('3. computing objective function, i.e., energy')
+        ene = your_compute_objective_function(domain_omega, u, spacestep)
+        print('4. computing parametric gradient')
+        grad = - (Alpha*u*p).real
+        while ene >= energy[k] and mu > 10 ** -5:
+            print('    a. computing gradient descent')
+            chi = descent_gradient.compute_gradient_descent(chi, grad, domain_omega, mu)
+            print('    b. computing projected gradient')
+            chi = descent_gradient.project(chi, 0.5, domain_omega)
+            print('    c. computing solution of Helmholtz problem, i.e., u')
+            alpha_rob = Alpha * chi
+            u = processing.solve_helmholtz(domain_omega, spacestep, wavenumber, f, f_dir, f_neu, f_rob,
+                        beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob)
+            print('    d. computing objective function, i.e., energy (E)')
+            energy[k] = your_compute_objective_function(domain_omega, u, spacestep)
+            if ene<energy[k]:
+                # The step is increased if the energy decreased
+                mu = mu * 1.1
+            else:
+                # The step is decreased is the energy increased
+                mu = mu / 2
+        k += 1
+
+    print('end. computing solution of Helmholtz problem, i.e., u')
+
+    return chi, energy, u, grad
+
+
+def your_compute_objective_function(domain_omega,  u, spacestep):
+    """
+    This function compute the objective function:
+    J(u,domain_omega)= \int_{domain_omega}||u||^2 + \int_{domain_omega_interest}||u||^2
+
+    Parameter:
+        domain_omega: Matrix (NxP), it defines the domain and the shape of the
+        Robin frontier;
+        u: Matrix (NxP), it is the solution of the Helmholtz problem, we are
+        computing its energy;
+        spacestep: float, it corresponds to the step used to solve the Helmholtz
+        equation.
+    """
+    N,p= numpy.shape(domain_omega)
+
+    # On ne calcule l'intégrale que sur les points qui sont dans le domaine omega puis omega_interest
+    # (où domain_omega == -1 pour domain_omega)
+    mask_omega = (domain_omega == -1)
+
+
+    # Indices pour la sélection du masque sur omega interest
+    n_indices_interst = round(4.2/10 * p) # donne par une règle de 3 le nombre de colonnes et lignes de omega_interest
+    i = (p - n_indices_interst) // 2 
+    j = i + n_indices_interst
+
+    # Création du masque de omega_interest
+    mask_position = numpy.zeros_like(domain_omega, dtype=bool)  # Initialisation d'un masque de positions
+    mask_position[i:j+1, i:j+1] = True  # Marquer True pour les positions entre i et j
+
+    # Ecriture masque du domaine omega_interest, ie les points de domain omega, restreints au carré de côté 4.2 centré
+    mask_omega = (domain_omega == -1)
+    
+    # Combinaison des deux masques
+    mask_omega_interest = mask_omega & mask_position
+
+    # Calcul de ||u||^2 pour chaque point
+    u_squared = numpy.abs(u) ** 2
+    
+    # Multiplication par le masque pour ne garder que les points dans le domaine
+    integral_omega = u_squared * mask_omega
+    integral_omega_interest = u_squared * mask_omega_interest
+    
+    # Calcul de l'intégrale par la méthode des rectangles
+    # On multiplie par spacestep^2 car c'est une intégrale 2D
+    energy = numpy.sum(integral_omega) * (spacestep ** 2) + numpy.sum(integral_omega_interest) * (spacestep ** 2)
+    
+    return energy
+
+    
+
+if __name__ == '__main__':
+
+    # ----------------------------------------------------------------------
+    # -- Fell free to modify the function call in this cell.
+    # ----------------------------------------------------------------------
+    # -- set parameters of the geometry
+    N = 100  # number of points along x-axis
+    M = 2 * N  # number of points along y-axis
+    level = 2 # level of the fractal
+    spacestep = 1.0 / N  # mesh size
+
+
+    # -- Choix de omega et on en déduit k
+    omega = 2*numpy.pi * 1.59e8
+    wavenumber = omega/(3e8)
+
+
+    # ----------------------------------------------------------------------
+    # -- Do not modify this cell, these are the values that you will be assessed against.
+    # ----------------------------------------------------------------------
+    # --- set coefficients of the partial differential equation
+    beta_pde, alpha_pde, alpha_dir, beta_neu, alpha_rob, beta_rob = preprocessing._set_coefficients_of_pde(M, N)
+
+
+    # -- set right hand sides of the partial differential equation
+    f, f_dir, f_neu, f_rob = preprocessing._set_rhs_of_pde(M, N)
+
+    # -- set geometry of domain
+    domain_omega, x, y, _, _ = preprocessing._set_geometry_of_domain(M, N, level)
+
+    
+    # Masque pour le domaine omega
+    mask_omega = (domain_omega == -1)
+
+    # Indices pour la sélection du masque sur omega interest
+    n_indices_interst = round(4.2/10 * N) # donne par une règle de 3 le nombre de colonnes et lignes de omega_interest
+    i = (N - n_indices_interst) // 2 
+    j = i + n_indices_interst
+
+    # Création du masque de omega_interest
+    mask_position = numpy.zeros_like(domain_omega, dtype=bool)  # Initialisation d'un masque de positions
+    mask_position[i:j+1, i:j+1] = True  # Marquer True pour les positions entre i et j
+    
+    # Combinaison des deux masques
+    mask_omega_interest = mask_omega & mask_position
+    
+
+    # ----------------------------------------------------------------------
+    # -- Fell free to modify the function call in this cell.
+    # ----------------------------------------------------------------------
+    # -- define boundary conditions
+    # planar wave defined on top
+    f_dir[:, :] = 0.0
+    f_dir[0, 0:N] = 1.0
+    # spherical wave defined on top
+    #f_dir[:, :] = 0.0
+    #f_dir[0, int(N/2)] = 10.0
+
+
+    # -- définition initiale de la bordure absorbante : chi (avec temp = la proportion de matériau absorbant)
+    """chi = preprocessing._set_chi(M, N, x, y)"""
+    chi = numpy.zeros((M, N), dtype=numpy.float64)
+    j0,j1,j2,j3 = 0 , N //3 , 2*N //3 , N-1
+
+    # Masque pour les points où `domain_omega == _env.NODE_ROBIN`
+    mask_key = (domain_omega == _env.NODE_ROBIN)
+
+    # Masque pour les colonnes dans les intervalles spécifiés
+    mask_columns = ((numpy.arange(N) >= j0) & (numpy.arange(N) < j1)) | ((numpy.arange(N) >= j2) & (numpy.arange(N) <= j3))
+
+    # Appliquer le masque pour avoir des 1 sur `chi` uniquement dans les bonnes colonnes et sur les points NODE_ROBIN
+    chi[:, :] = mask_key & mask_columns[numpy.newaxis, :]
+    numpy.savetxt('chi_new.txt',chi,fmt="%d")
+
+    #chi = numpy.ones((M,N))
+    chi = preprocessing.set2zero(chi, domain_omega)
+    numpy.savetxt("chi_proj.txt", chi)  
+
+    # -- Calcul de alpha du matériau considéré : Alpha qui impose alpha_rob
+    import compute_alpha_vf
+
+    Alpha = compute_alpha_vf.compute_alpha(omega,"Absorbing material")[0]
+    alpha_rob = Alpha * chi
+
+    # -- set parameters for optimization
+    S = 0  # surface of the fractal  
+    for i in range(0, M):
+        for j in range(0, N):
+            if domain_omega[i, j] == _env.NODE_ROBIN:
+                S += 1
+    V_0 = 1  # initial volume of the domain
+    V_obj = numpy.sum(numpy.sum(chi)) / S  # constraint on the density
+    mu = 5  # initial gradient step
+    mu1 = 10**(-5)  # parameter of the volume functional
+
+    # ----------------------------------------------------------------------
+    # -- Do not modify this cell, these are the values that you will be assessed against.
+    # ----------------------------------------------------------------------
+
+    # -- Solution du problème d'Helmoltz : u
+    u = processing.solve_helmholtz(domain_omega, spacestep, wavenumber, f, f_dir, f_neu, f_rob,
+                        beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob)
+    
+
+    # -- solution du problème adjoint : p
+    one = numpy.ones((M,N))
+    f_p = -2 * (one + mask_omega_interest)*u.conj()
+    f_dir_p = numpy.zeros((M, N), dtype=numpy.complex128)
+    p = processing.solve_helmholtz(domain_omega, spacestep, wavenumber, f_p, f_dir_p, f_neu, f_rob,
+                        beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob)
+
+    # -- Calcul du gradient en conséquence : grad
+    grad = - (Alpha*u*p).real
+    numpy.savetxt("grad.txt", grad, fmt="%.2f")  
+
+    # -- On conserve chi0, u0 pour les plots
+    chi0 = chi.copy()
+    u0 = u.copy()
+
+    # -- pas initial de la descente de gradient : zeta
+    zeta = 10
+
+    # -- Première itération pour l'optimisation de chi : chi1
+    chi1 = preprocessing.set2zero(projected_chi.compute_projected(chi,domain_omega,V_obj),domain_omega)
+
+    # -- Mise à jour de alpha_rob avec le nouveau chi
+    alpha_rob = Alpha * chi1
+
+    # -- Solution du problème d'Helmoltz avec le nouveau chi : u1
+    u1 = processing.solve_helmholtz(domain_omega, spacestep, wavenumber, f, f_dir, f_neu, f_rob,
+                        beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob)
+    
+
+    #-- Boucle while qui génère la solution optimale pour chi en minimisant l'énergie
+    j = 0
+    while descent_gradient.dist_L_inf(chi,chi1)>0.01:
+
+        # -- Trouver le nouveau pas : zeta
+        if your_compute_objective_function(domain_omega,u,spacestep)>your_compute_objective_function(domain_omega,u1,spacestep):
+            zeta = zeta+0.001
+            j = 0
+        else:
+            zeta = zeta/(2**(j+1))
+            j = j+1
+
+        # Mises à jours de chi et u
+        chi = chi1.copy()
+        u = u1.copy()
+
+        # -- Solution du nouveau problème d'Helmoltz
+        f_p = -2 * (one + mask_omega_interest)*u.conj()
+
+        p = processing.solve_helmholtz(domain_omega, spacestep, wavenumber, f_p, f_dir_p, f_neu, f_rob,
+                        beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob)
+
+        grad = - (Alpha*u*p).real
+
+
+        chi1 = preprocessing.set2zero(projected_chi.compute_projected(chi,domain_omega,V_obj),domain_omega)
+
+        alpha_rob = Alpha * chi1
+
+        u1 = processing.solve_helmholtz(domain_omega, spacestep, wavenumber, f, f_dir, f_neu, f_rob,
+                        beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob)
+
+        
+    # ----------------------------------------------------------------------
+    # -- Fell free to modify the function call in this cell.
+    # ----------------------------------------------------------------------
+    # -- compute optimization
+    energy = numpy.zeros((100+1, 1), dtype=numpy.float64)
+    # chi, energy, u, grad = your_optimization_procedure(...)
+    #chi, energy, u, grad = solutions.optimization_procedure(domain_omega, spacestep, wavenumber, f, f_dir, f_neu, f_rob,
+    #                    beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob,
+    #                    Alpha, mu, chi, V_obj, mu1, V_0)
+    # --- en of optimization
+
+    chin = preprocessing.set2zero(chi.copy(), domain_omega)
+    un = u.copy()
+
+    #print("chi : -----" , chi)
+    # -- plot chi, u, and energy
+    postprocessing._plot_uncontroled_solution(u0, chi0)
+    postprocessing._plot_controled_solution(un, chin)
+    err = un - u0
+    postprocessing._plot_error(err)
+    print("énergie de u0:-------------------",your_compute_objective_function(domain_omega, u0, spacestep))
+    print("\n")
+    print("énergie de u_n:--------------------",your_compute_objective_function(domain_omega, un, spacestep))
+    # postprocessing._plot_energy_history(energy)
+    # omega_min = 2 * numpy.pi * 1e7
+    # omega_max = 2 * numpy.pi * 2e9
+    # omegas = numpy.linspace(omega_min, omega_max, num=20) 
+
+    # # Initialisation des listes pour stocker les valeurs
+    # objective_values_0 = []
+    # objective_values_n = []
+    # # Boucle sur les différentes valeurs de omega
+    # for omega in omegas:
+    #     wavenumber = omega/(3e8)
+    #     Alpha = compute_alpha_vf.compute_alpha(omega, "Absorbing material")[0]
+    #     alpha_rob_0 = Alpha * chi0
+    #     alpha_rob_n = Alpha * chin
+    #     # Calcul de la solution de Helmholtz pour obtenir u
+    #     u = processing.solve_helmholtz(domain_omega, spacestep, wavenumber, f, f_dir, f_neu, f_rob,
+    #                                 beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob_0)
+        
+    #     # Calcul de la fonction objectif
+    #     objective_value_0 = your_compute_objective_function(domain_omega, u, spacestep)
+    #     objective_values_0.append(objective_value_0)
+
+    #     u = processing.solve_helmholtz(domain_omega, spacestep, wavenumber, f, f_dir, f_neu, f_rob,
+    #                                 beta_pde, alpha_pde, alpha_dir, beta_neu, beta_rob, alpha_rob_n)
+        
+    #     objective_value_n = your_compute_objective_function(domain_omega, u, spacestep)
+    #     objective_values_n.append(objective_value_n)
+    # # Tracé des résultats
+    # matplotlib.pyplot.figure(figsize=(10, 6))
+    # matplotlib.pyplot.plot(omegas, objective_values_0, label="Objective Function (chi0)", color="blue")
+    # matplotlib.pyplot.plot(omegas, objective_values_n, label="Objective Function (chin)", color="red")
+    # matplotlib.pyplot.xlabel(r"$\omega$ (rad/s)")
+    # matplotlib.pyplot.ylabel("Objective Function Value")
+    # matplotlib.pyplot.title("Objective Function Value vs. Omega")
+    # matplotlib.pyplot.legend()
+    # matplotlib.pyplot.grid(True)
+    # matplotlib.pyplot.show()
+    print('End.')
